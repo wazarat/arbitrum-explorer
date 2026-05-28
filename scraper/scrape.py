@@ -2,10 +2,13 @@
 
 Multi-strategy scraper. We try, in priority order:
 
-1. Intercept JSON network responses while the page loads (Next.js sites
-   typically fetch their data from an API endpoint).
-2. Parse the `__NEXT_DATA__` blob embedded in the HTML.
-3. Fall back to DOM scraping of project cards using CSS selectors.
+1. Parse the Next.js RSC payload (`self.__next_f.push([1, "..."])` chunks
+   in the HTML). The Arbitrum portal uses the App Router, so its server
+   components stream the full projects list as JSON inside these chunks.
+2. Intercept JSON network responses while the page loads (fallback for
+   pages that fetch from an API endpoint).
+3. Parse the `__NEXT_DATA__` blob embedded in the HTML (legacy Next.js).
+4. Fall back to DOM scraping of project cards using CSS selectors.
 
 After scraping we normalise everything into the schema documented in
 `scraper/README.md` and write it to `../data/projects.json`.
@@ -21,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +44,100 @@ DEBUG_DIR = Path(__file__).resolve().parent / "debug"
 
 # Heuristic: keys we expect on a project record from an API response.
 PROJECT_KEY_HINTS = {"name", "title", "slug", "description", "category", "subCategory", "subcategory", "chains"}
+
+
+# ---------------------------------------------------------------------------
+# Strategy 1: Next.js RSC payload (self.__next_f.push chunks)
+# ---------------------------------------------------------------------------
+
+# Top-level category slugs the portal uses today, mapped to display names.
+# Unknown slugs fall back to a title-cased version of the slug.
+CATEGORY_DISPLAY: dict[str, str] = {
+    "ai-and-depin": "AI & DePIN",
+    "bridges-and-on-ramps": "Bridges & On-ramps",
+    "consumer": "Consumer",
+    "defi": "DeFi",
+    "gaming": "Gaming",
+    "infra-and-tools": "Infra & Tools",
+}
+
+
+def _category_display(slug: str) -> str:
+    if not slug:
+        return ""
+    if slug in CATEGORY_DISPLAY:
+        return CATEGORY_DISPLAY[slug]
+    return " ".join(w.capitalize() for w in slug.replace("_", "-").split("-"))
+
+
+def _balance_json_array(text: str, start: int) -> str | None:
+    """Return text[start:end+1] where text[start] == '[' and text[end] is the
+    matching ']'. Handles strings + escapes. Returns None on imbalance."""
+    if start >= len(text) or text[start] != "[":
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+    return None
+
+
+def extract_from_rsc(html: str) -> list[dict] | None:
+    """Parse the Next.js App-Router RSC payload from a rendered page.
+
+    The portal embeds chunks like `self.__next_f.push([1, "...escaped json..."])`.
+    Concatenating their string payloads yields the streamed RSC text, inside
+    which the projects array appears as `"projects":[{...},...]`.
+    """
+    chunks = re.findall(r"self\.__next_f\.push\(\[1,(\".*?\")\]\)", html, flags=re.DOTALL)
+    if not chunks:
+        return None
+    combined_parts: list[str] = []
+    for s in chunks:
+        try:
+            combined_parts.append(json.loads(s))
+        except Exception:
+            pass
+    if not combined_parts:
+        return None
+    combined = "".join(combined_parts)
+
+    # Take the largest projects array we can find (the page usually has one
+    # canonical list; if multiple, the biggest one is the directory).
+    best: list[dict] | None = None
+    for match in re.finditer(r'"projects"\s*:\s*\[', combined):
+        bracket_start = combined.index("[", match.start())
+        arr_str = _balance_json_array(combined, bracket_start)
+        if not arr_str:
+            continue
+        try:
+            arr = json.loads(arr_str)
+        except Exception:
+            continue
+        if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+            # Sanity check: at least half the items look project-shaped.
+            sample = sum(1 for x in arr if isinstance(x, dict) and ("title" in x or "name" in x))
+            if sample >= max(20, len(arr) // 2):
+                if best is None or len(arr) > len(best):
+                    best = arr
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +166,7 @@ class NetworkCapture:
 
 
 # ---------------------------------------------------------------------------
-# Strategy 1: extract from captured network responses
+# Strategy 2: extract from captured network responses
 # ---------------------------------------------------------------------------
 
 def _looks_like_project(obj: Any) -> bool:
@@ -107,7 +205,7 @@ def extract_from_network(capture: NetworkCapture) -> list[dict] | None:
 
 
 # ---------------------------------------------------------------------------
-# Strategy 2: __NEXT_DATA__
+# Strategy 3: __NEXT_DATA__ (legacy Next.js Pages Router)
 # ---------------------------------------------------------------------------
 
 async def extract_from_next_data(page: Page) -> list[dict] | None:
@@ -131,7 +229,7 @@ async def extract_from_next_data(page: Page) -> list[dict] | None:
 
 
 # ---------------------------------------------------------------------------
-# Strategy 3: DOM scrape (fallback). Selectors live here so they're easy
+# Strategy 4: DOM scrape (fallback). Selectors live here so they're easy
 # to tune if the portal markup changes.
 # ---------------------------------------------------------------------------
 
@@ -297,11 +395,38 @@ def normalise_project(raw: dict) -> dict:
         if slug:
             portal_url = f"https://portal.arbitrum.io/projects/{slug}"
 
+    # RSC-shaped records nest assets under `images.{logoUrl,bannerUrl}`.
+    images = raw.get("images")
+    if isinstance(images, dict):
+        logo_url = logo_url or images.get("logoUrl") or images.get("bannerUrl") or ""
+
+    # RSC-shaped records expose category as an id list; map to display name.
+    if not category:
+        cat_ids = raw.get("categoryIds")
+        if isinstance(cat_ids, list) and cat_ids:
+            category = _category_display(str(cat_ids[0]))
+
+    # RSC-shaped records expose sub-category as a list of dicts.
+    if not sub_category:
+        subs = raw.get("subcategories")
+        if isinstance(subs, list) and subs:
+            first = subs[0]
+            if isinstance(first, dict):
+                sub_category = first.get("title") or first.get("name") or first.get("slug") or ""
+            elif isinstance(first, str):
+                sub_category = first
+        if not sub_category:
+            sub_ids = raw.get("subcategoryIds")
+            if isinstance(sub_ids, list) and sub_ids:
+                sub_category = _category_display(str(sub_ids[0]))
+
     # Sometimes socials live under a `socials` / `links` dict.
     socials = _pluck(raw, "socials", "social", "links") or {}
     if isinstance(socials, dict):
         twitter = twitter or socials.get("twitter") or socials.get("x") or ""
         discord = discord or socials.get("discord") or ""
+        # RSC uses `links.website`; pull it here if the top-level lookup missed it.
+        website = website or socials.get("website") or socials.get("homepage") or ""
     elif isinstance(socials, list):
         for item in socials:
             if not isinstance(item, dict):
@@ -402,14 +527,21 @@ async def scrape(headed: bool = False, debug: bool = False) -> dict:
         print("→ Auto-scrolling to trigger lazy loads", flush=True)
         await auto_scroll(page)
 
-        # Try strategies in order.
+        # Try strategies in order: RSC > network > __NEXT_DATA__ > DOM.
         projects_raw: list[dict] = []
         used_strategy = "none"
 
-        net_projects = extract_from_network(capture)
-        if net_projects:
-            projects_raw = net_projects
-            used_strategy = "network"
+        html = await page.content()
+        rsc_projects = extract_from_rsc(html)
+        if rsc_projects:
+            projects_raw = rsc_projects
+            used_strategy = "rsc"
+
+        if not projects_raw:
+            net_projects = extract_from_network(capture)
+            if net_projects:
+                projects_raw = net_projects
+                used_strategy = "network"
 
         if not projects_raw:
             nd_projects = await extract_from_next_data(page)
