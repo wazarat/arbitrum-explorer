@@ -28,6 +28,40 @@ the deployed site.
 
 - `--output PATH` — write JSON somewhere other than `../data/projects.json`.
 - `--headed` — show the browser window (useful for debugging selectors).
+- `--debug` — dump full-page HTML, a screenshot, and a network log to
+  `scraper/debug/` so you can inspect what the page actually returned.
+
+## How it works
+
+The scraper tries three strategies and uses the first one that produces a
+sizeable list of projects:
+
+1. **Network capture** (preferred) — listens for JSON XHR/fetch responses
+   while the SPA hydrates and picks the response whose payload looks most
+   like a project list.
+2. **`__NEXT_DATA__` blob** — Next.js sites often embed their props as a
+   JSON `<script id="__NEXT_DATA__">`. We parse it and look for project-shaped
+   arrays.
+3. **DOM scrape** — last resort. Selectors live at the top of `scrape.py`
+   in `DOM_SELECTORS` so they're easy to tweak.
+
+The output `strategy` field tells you which one was used so you can verify.
+
+## Troubleshooting
+
+If the first run yields 0 projects:
+
+```bash
+python scrape.py --headed --debug
+```
+
+Then inspect `scraper/debug/`:
+
+- `page.png` — what the browser actually saw (Cloudflare? login?).
+- `page.html` — the rendered DOM for selector tuning.
+- `network.json` — every JSON response URL + a preview of its body. Look for
+  the endpoint that returns the project list and we can hardcode it as a
+  fast-path if needed.
 
 ## Output schema
 
@@ -35,10 +69,12 @@ the deployed site.
 {
   "scraped_at": "2026-05-28T16:30:00Z",
   "source": "https://portal.arbitrum.io/projects",
+  "strategy": "network",                       // network | next_data | dom | none
   "categories": [
     { "name": "DeFi", "sub_categories": ["DEX", "Lending/Borrowing", ...] }
   ],
   "chains": ["Arbitrum One", "Arbitrum Nova", "..."],
+  "filter_metadata": { "groups": [/* raw sidebar groupings */] },
   "projects": [
     {
       "name": "Example",
@@ -58,4 +94,6 @@ the deployed site.
 
 ## Status
 
-- **v1 (current)**: skeleton CLI; scraping logic lands in Milestone 2.
+- **v1 (current)**: multi-strategy scraper implemented (network capture →
+  `__NEXT_DATA__` → DOM fallback). Selectors may need tuning after the
+  first real run; use `--debug` to iterate.
