@@ -438,7 +438,76 @@ def normalise_project(raw: dict) -> dict:
             elif kind == "discord" and not discord:
                 discord = url
 
+    # ---- Multi-category arrays (full lists) -------------------------------
+    categories: list[str] = []
+    cat_ids = raw.get("categoryIds")
+    if isinstance(cat_ids, list):
+        categories = [_category_display(str(c)) for c in cat_ids if c]
+    if not categories and category:
+        categories = [category]
+
+    sub_categories: list[str] = []
+    raw_subs = raw.get("subcategories")
+    if isinstance(raw_subs, list):
+        for s in raw_subs:
+            if isinstance(s, dict):
+                t = s.get("title") or s.get("name") or s.get("slug") or ""
+                if t:
+                    sub_categories.append(str(t))
+            elif isinstance(s, str) and s:
+                sub_categories.append(s)
+    if not sub_categories:
+        sub_ids = raw.get("subcategoryIds")
+        if isinstance(sub_ids, list):
+            sub_categories = [_category_display(str(s)) for s in sub_ids if s]
+    if not sub_categories and sub_category:
+        sub_categories = [sub_category]
+
+    # ---- Identity ---------------------------------------------------------
+    proj_id = str(_pluck(raw, "id") or "")
+    proj_slug = str(_pluck(raw, "slug") or "")
+
+    # ---- Extra links (links.* in RSC) -------------------------------------
+    links_dict = socials if isinstance(socials, dict) else {}
+    github = str(links_dict.get("github") or "")
+    coingecko = str(links_dict.get("coingecko") or "")
+    audit_link = str(links_dict.get("audit") or "")
+    news_link = str(links_dict.get("news") or "")
+    funding_news = str(links_dict.get("fundingNews") or links_dict.get("funding_news") or "")
+    video_link = str(links_dict.get("video") or "")
+    opensea = str(links_dict.get("opensea") or "")
+
+    # ---- Imagery (banner) -------------------------------------------------
+    banner_url = ""
+    if isinstance(images, dict):
+        banner_url = str(images.get("bannerUrl") or images.get("banner_url") or "")
+
+    # ---- Meta flags & dates ----------------------------------------------
+    meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+    is_live = bool(meta.get("isLive")) if meta else False
+    is_arbitrum_native = bool(meta.get("isArbitrumNative")) if meta else False
+    is_publicly_audited = bool(meta.get("isPublicallyAudited")) if meta else False
+    is_trending = bool(meta.get("isTrending")) if meta else False
+    is_featured = bool(
+        meta.get("isFeaturedOnHomePageBanner") or meta.get("isFeaturedOnCategoryPage")
+    ) if meta else False
+    audit_report_date = str(meta.get("auditReportDate") or "")
+    founded_date = str(meta.get("foundedDate") or "")
+    created_time = str(meta.get("createdTime") or "")
+    nft_mint_date = str(meta.get("nftMintDate") or "")
+    sp_raw = meta.get("supportedPlatforms") or []
+    if isinstance(sp_raw, list):
+        supported_platforms = [s.strip() for s in sp_raw if isinstance(s, str) and s.strip()]
+    else:
+        supported_platforms = []
+
+    # ---- Live incentive window -------------------------------------------
+    incentives = raw.get("liveIncentives") if isinstance(raw.get("liveIncentives"), dict) else {}
+    live_incentive_start = str(incentives.get("startDate") or incentives.get("start") or "")
+    live_incentive_end = str(incentives.get("endDate") or incentives.get("end") or "")
+
     return {
+        # ----- v1 singular fields (kept for back-compat) -------------------
         "name": str(name).strip(),
         "description": str(description).strip(),
         "category": str(category).strip(),
@@ -449,6 +518,37 @@ def normalise_project(raw: dict) -> dict:
         "discord": discord,
         "logo_url": logo_url,
         "portal_url": portal_url,
+        # ----- v1.1 multi-category arrays ---------------------------------
+        "categories": categories,
+        "sub_categories": sub_categories,
+        # ----- v1.1 identity ----------------------------------------------
+        "id": proj_id,
+        "slug": proj_slug,
+        # ----- v1.1 extra links -------------------------------------------
+        "github": github,
+        "coingecko": coingecko,
+        "audit": audit_link,
+        "news": news_link,
+        "funding_news": funding_news,
+        "video": video_link,
+        "opensea": opensea,
+        # ----- v1.1 imagery -----------------------------------------------
+        "banner_url": banner_url,
+        # ----- v1.1 status flags ------------------------------------------
+        "is_live": is_live,
+        "is_arbitrum_native": is_arbitrum_native,
+        "is_publicly_audited": is_publicly_audited,
+        "is_trending": is_trending,
+        "is_featured": is_featured,
+        # ----- v1.1 dates -------------------------------------------------
+        "audit_report_date": audit_report_date,
+        "founded_date": founded_date,
+        "created_time": created_time,
+        "nft_mint_date": nft_mint_date,
+        # ----- v1.1 platform & incentives ---------------------------------
+        "supported_platforms": supported_platforms,
+        "live_incentive_start": live_incentive_start,
+        "live_incentive_end": live_incentive_end,
     }
 
 
