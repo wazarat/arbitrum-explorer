@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Search, X } from "lucide-react";
+import { Search, SlidersHorizontal, X } from "lucide-react";
+import { cn } from "@/lib/utils";
 import type { CategoryGroup, Project } from "@/lib/types";
 import {
   type FilterState,
@@ -15,6 +16,7 @@ import {
   isFilterEmpty,
   subKey,
 } from "@/lib/filters";
+import { ExportButton } from "./export-button";
 import { FilterSidebar } from "./filter-sidebar";
 import { ProjectCard } from "./project-card";
 
@@ -40,6 +42,7 @@ export function ExplorerView({ projects, categories, chains, scrapedAt, strategy
   const [state, setState] = useState<FilterState>(initial);
   const [searchInput, setSearchInput] = useState(initial.query);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   // Debounce search input -> committed query in state.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -148,14 +151,41 @@ export function ExplorerView({ projects, categories, chains, scrapedAt, strategy
           </div>
         </div>
 
-        <SearchInput
-          value={searchInput}
-          onChange={setSearchInput}
-          onClear={() => setSearchInput("")}
-        />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="flex-1">
+            <SearchInput
+              value={searchInput}
+              onChange={setSearchInput}
+              onClear={() => setSearchInput("")}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setMobileFiltersOpen((o) => !o)}
+              className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-sm font-medium hover:bg-secondary/60 lg:hidden"
+              aria-expanded={mobileFiltersOpen}
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+              Filters
+              {state.subCategories.size + state.chains.size > 0 && (
+                <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">
+                  {state.subCategories.size + state.chains.size}
+                </span>
+              )}
+            </button>
+            <ExportButton filtered={filtered} all={projects} />
+          </div>
+        </div>
       </header>
 
       <div className="flex flex-col gap-6 lg:flex-row">
+        <div
+          className={cn(
+            "lg:block",
+            mobileFiltersOpen ? "block" : "hidden"
+          )}
+        >
         <FilterSidebar
           categories={categories}
           chains={chains}
@@ -167,6 +197,7 @@ export function ExplorerView({ projects, categories, chains, scrapedAt, strategy
           onToggleChain={toggleChain}
           onClearAll={clearAll}
         />
+        </div>
 
         <section className="min-w-0 flex-1">
           {projects.length === 0 ? (
